@@ -275,127 +275,6 @@ func TestEncodeAllGo1Dot4(t *testing.T)                 { testEncodeAll(t, false
 func TestEncodeAllGo1Dot5(t *testing.T)                 { testEncodeAll(t, true, false) }
 func TestEncodeAllGo1Dot5GlobalColorModel(t *testing.T) { testEncodeAll(t, true, true) }
 
-func testStreamEncode(t *testing.T, go1Dot5Fields bool, useGlobalColorModel bool) {
-	const width, height = 150, 103
-
-	var buf bytes.Buffer
-
-	sOptions := &StreamerOptions{
-		LoopCount: 5,
-	}
-
-	g0Image := make([]*image.Paletted, len(frames))
-	g0Delay := make([]int, len(frames))
-	var g0Disposal []byte
-
-	// The GIF.Disposal, GIF.Config and GIF.BackgroundIndex fields were added
-	// in Go 1.5. Valid Go 1.4 or earlier code should still produce valid GIFs.
-	//
-	// On the following line, color.Model is an interface type, and
-	// color.Palette is a concrete (slice) type.
-	globalColorModel, backgroundIndex := color.Model(color.Palette(nil)), uint8(0)
-	if useGlobalColorModel {
-		globalColorModel, backgroundIndex = color.Palette(palette.WebSafe), uint8(1)
-	}
-	if go1Dot5Fields {
-		g0Disposal = make([]byte, len(frames))
-		for i := range g0Disposal {
-			g0Disposal[i] = DisposalNone
-		}
-		sOptions.Config = image.Config{
-			ColorModel: globalColorModel,
-			Width:      width,
-			Height:     height,
-		}
-		sOptions.BackgroundIndex = backgroundIndex
-	}
-
-	streamer := NewStreamer(&buf, sOptions)
-
-	for i, f := range frames {
-		g, err := readGIF(f)
-		if err != nil {
-			t.Fatal(f, err)
-		}
-		m := g.Image[0]
-		if m.Bounds().Dx() != width || m.Bounds().Dy() != height {
-			t.Fatalf("frame %d had unexpected bounds: got %v, want width/height = %d/%d",
-				i, m.Bounds(), width, height)
-		}
-
-		disposal := uint8(0)
-		if len(g0Disposal)-1 > i {
-			disposal = g0Disposal[i]
-		}
-		if err = streamer.Encode(m, 0, disposal); err != nil {
-			t.Fatal("Streamer.Encode:", err)
-		}
-		g0Image[i] = m
-	}
-
-	if err := streamer.Close(); err != nil {
-		t.Fatal("Streamer.Close:", err)
-	}
-
-	encoded := buf.Bytes()
-	config, err := DecodeConfig(bytes.NewReader(encoded))
-	if err != nil {
-		t.Fatal("DecodeConfig:", err)
-	}
-	g1, err := DecodeAll(bytes.NewReader(encoded))
-	if err != nil {
-		t.Fatal("DecodeAll:", err)
-	}
-
-	if !reflect.DeepEqual(config, g1.Config) {
-		t.Errorf("DecodeConfig inconsistent with DecodeAll")
-	}
-	if !palettesEqual(g1.Config.ColorModel.(color.Palette), globalColorModel.(color.Palette)) {
-		t.Errorf("unexpected global color model")
-	}
-	if w, h := g1.Config.Width, g1.Config.Height; w != width || h != height {
-		t.Errorf("got config width * height = %d * %d, want %d * %d", w, h, width, height)
-	}
-
-	if sOptions.LoopCount != g1.LoopCount {
-		t.Errorf("loop counts differ: %d and %d", sOptions.LoopCount, g1.LoopCount)
-	}
-	if backgroundIndex != g1.BackgroundIndex {
-		t.Errorf("background indexes differ: %d and %d", backgroundIndex, g1.BackgroundIndex)
-	}
-	if len(g0Image) != len(g1.Image) {
-		t.Fatalf("image lengths differ: %d and %d", len(g0Image), len(g1.Image))
-	}
-	if len(g1.Image) != len(g1.Delay) {
-		t.Fatalf("image and delay lengths differ: %d and %d", len(g1.Image), len(g1.Delay))
-	}
-	if len(g1.Image) != len(g1.Disposal) {
-		t.Fatalf("image and disposal lengths differ: %d and %d", len(g1.Image), len(g1.Disposal))
-	}
-
-	for i := range g0Image {
-		m0, m1 := g0Image[i], g1.Image[i]
-		if m0.Bounds() != m1.Bounds() {
-			t.Errorf("frame %d: bounds differ: %v and %v", i, m0.Bounds(), m1.Bounds())
-		}
-		d0, d1 := g0Delay[i], g1.Delay[i]
-		if d0 != d1 {
-			t.Errorf("frame %d: delay values differ: %d and %d", i, d0, d1)
-		}
-		p0, p1 := uint8(0), g1.Disposal[i]
-		if go1Dot5Fields {
-			p0 = DisposalNone
-		}
-		if p0 != p1 {
-			t.Errorf("frame %d: disposal values differ: %d and %d", i, p0, p1)
-		}
-	}
-}
-
-func TestStreamEncodeGo1Dot4(t *testing.T)                 { testStreamEncode(t, false, false) }
-func TestStreamEncodeGo1Dot5(t *testing.T)                 { testStreamEncode(t, true, false) }
-func TestStreamEncodeGo1Dot5GlobalColorModel(t *testing.T) { testStreamEncode(t, true, true) }
-
 func TestEncodeMismatchDelay(t *testing.T) {
 	images := make([]*image.Paletted, 2)
 	for i := range images {
@@ -642,6 +521,263 @@ func TestEncodeBadPalettes(t *testing.T) {
 					Height:     h,
 				},
 			})
+
+			got := err != nil
+			want := n > 256 || nilColors
+			if got != want {
+				t.Errorf("n=%d, nilColors=%t: err != nil: got %t, want %t", n, nilColors, got, want)
+			}
+		}
+	}
+}
+
+func testStreamEncode(t *testing.T, go1Dot5Fields bool, useGlobalColorModel bool) {
+	const width, height = 150, 103
+
+	var buf bytes.Buffer
+
+	sOptions := &StreamEncoderOptions{
+		LoopCount: 5,
+	}
+
+	g0Image := make([]*image.Paletted, len(frames))
+	g0Delay := make([]int, len(frames))
+	var g0Disposal []byte
+
+	// The GIF.Disposal, GIF.Config and GIF.BackgroundIndex fields were added
+	// in Go 1.5. Valid Go 1.4 or earlier code should still produce valid GIFs.
+	//
+	// On the following line, color.Model is an interface type, and
+	// color.Palette is a concrete (slice) type.
+	globalColorModel, backgroundIndex := color.Model(color.Palette(nil)), uint8(0)
+	if useGlobalColorModel {
+		globalColorModel, backgroundIndex = color.Palette(palette.WebSafe), uint8(1)
+	}
+	if go1Dot5Fields {
+		g0Disposal = make([]byte, len(frames))
+		for i := range g0Disposal {
+			g0Disposal[i] = DisposalNone
+		}
+		sOptions.Config = image.Config{
+			ColorModel: globalColorModel,
+			Width:      width,
+			Height:     height,
+		}
+		sOptions.BackgroundIndex = backgroundIndex
+	}
+
+	streamer := NewStreamEncoder(&buf, sOptions)
+
+	for i, f := range frames {
+		g, err := readGIF(f)
+		if err != nil {
+			t.Fatal(f, err)
+		}
+		m := g.Image[0]
+		if m.Bounds().Dx() != width || m.Bounds().Dy() != height {
+			t.Fatalf("frame %d had unexpected bounds: got %v, want width/height = %d/%d",
+				i, m.Bounds(), width, height)
+		}
+
+		disposal := uint8(0)
+		if len(g0Disposal)-1 > i {
+			disposal = g0Disposal[i]
+		}
+		if err = streamer.Encode(m, 0, disposal); err != nil {
+			t.Fatal("Streamer.Encode:", err)
+		}
+		g0Image[i] = m
+	}
+
+	if err := streamer.Close(); err != nil {
+		t.Fatal("Streamer.Close:", err)
+	}
+
+	encoded := buf.Bytes()
+	config, err := DecodeConfig(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal("DecodeConfig:", err)
+	}
+	g1, err := DecodeAll(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatal("DecodeAll:", err)
+	}
+
+	if !reflect.DeepEqual(config, g1.Config) {
+		t.Errorf("DecodeConfig inconsistent with DecodeAll")
+	}
+	if !palettesEqual(g1.Config.ColorModel.(color.Palette), globalColorModel.(color.Palette)) {
+		t.Errorf("unexpected global color model")
+	}
+	if w, h := g1.Config.Width, g1.Config.Height; w != width || h != height {
+		t.Errorf("got config width * height = %d * %d, want %d * %d", w, h, width, height)
+	}
+
+	if sOptions.LoopCount != g1.LoopCount {
+		t.Errorf("loop counts differ: %d and %d", sOptions.LoopCount, g1.LoopCount)
+	}
+	if backgroundIndex != g1.BackgroundIndex {
+		t.Errorf("background indexes differ: %d and %d", backgroundIndex, g1.BackgroundIndex)
+	}
+	if len(g0Image) != len(g1.Image) {
+		t.Fatalf("image lengths differ: %d and %d", len(g0Image), len(g1.Image))
+	}
+	if len(g1.Image) != len(g1.Delay) {
+		t.Fatalf("image and delay lengths differ: %d and %d", len(g1.Image), len(g1.Delay))
+	}
+	if len(g1.Image) != len(g1.Disposal) {
+		t.Fatalf("image and disposal lengths differ: %d and %d", len(g1.Image), len(g1.Disposal))
+	}
+
+	for i := range g0Image {
+		m0, m1 := g0Image[i], g1.Image[i]
+		if m0.Bounds() != m1.Bounds() {
+			t.Errorf("frame %d: bounds differ: %v and %v", i, m0.Bounds(), m1.Bounds())
+		}
+		d0, d1 := g0Delay[i], g1.Delay[i]
+		if d0 != d1 {
+			t.Errorf("frame %d: delay values differ: %d and %d", i, d0, d1)
+		}
+		p0, p1 := uint8(0), g1.Disposal[i]
+		if go1Dot5Fields {
+			p0 = DisposalNone
+		}
+		if p0 != p1 {
+			t.Errorf("frame %d: disposal values differ: %d and %d", i, p0, p1)
+		}
+	}
+}
+
+func TestStreamEncodeGo1Dot4(t *testing.T)                 { testStreamEncode(t, false, false) }
+func TestStreamEncodeGo1Dot5(t *testing.T)                 { testStreamEncode(t, true, false) }
+func TestStreamEncodeGo1Dot5GlobalColorModel(t *testing.T) { testStreamEncode(t, true, true) }
+
+func TestStreamEncodeZeroGIF(t *testing.T) {
+	e := NewStreamEncoder(io.Discard, &StreamEncoderOptions{})
+	if err := e.Close(); err == nil {
+		t.Error("expected error from providing empty gif")
+	}
+}
+
+func TestStreamEncodeAllFramesOutOfBounds(t *testing.T) {
+	images := []*image.Paletted{
+		image.NewPaletted(image.Rect(0, 0, 5, 5), palette.Plan9),
+		image.NewPaletted(image.Rect(2, 2, 8, 8), palette.Plan9),
+		image.NewPaletted(image.Rect(3, 3, 4, 4), palette.Plan9),
+	}
+
+	for _, upperBound := range []int{6, 10} {
+		e := NewStreamEncoder(io.Discard, &StreamEncoderOptions{
+			Config: image.Config{
+				Width:  upperBound,
+				Height: upperBound,
+			},
+		})
+		for _, img := range images {
+			if err := e.Encode(img, 0, 0); err != nil {
+				t.Fatalf("StreamEncoder.Encode: %v", err)
+			}
+		}
+
+		err := e.Close()
+		if upperBound >= 8 {
+			if err != nil {
+				t.Errorf("upperBound=%d: %v", upperBound, err)
+			}
+		} else {
+			if err == nil {
+				t.Errorf("upperBound=%d: got nil error, want non-nil", upperBound)
+			}
+		}
+	}
+}
+
+func TestStreamEncodePalettes(t *testing.T) {
+	const w, h = 5, 5
+	pals := []color.Palette{{
+		color.RGBA{0x00, 0x00, 0x00, 0xff},
+		color.RGBA{0x01, 0x00, 0x00, 0xff},
+		color.RGBA{0x02, 0x00, 0x00, 0xff},
+	}, {
+		color.RGBA{0x00, 0x00, 0x00, 0xff},
+		color.RGBA{0x00, 0x01, 0x00, 0xff},
+	}, {
+		color.RGBA{0x00, 0x00, 0x03, 0xff},
+		color.RGBA{0x00, 0x00, 0x02, 0xff},
+		color.RGBA{0x00, 0x00, 0x01, 0xff},
+		color.RGBA{0x00, 0x00, 0x00, 0xff},
+	}, {
+		color.RGBA{0x10, 0x07, 0xf0, 0xff},
+		color.RGBA{0x20, 0x07, 0xf0, 0xff},
+		color.RGBA{0x30, 0x07, 0xf0, 0xff},
+		color.RGBA{0x40, 0x07, 0xf0, 0xff},
+		color.RGBA{0x50, 0x07, 0xf0, 0xff},
+	}}
+
+	images := []*image.Paletted{
+		image.NewPaletted(image.Rect(0, 0, w, h), pals[0]),
+		image.NewPaletted(image.Rect(0, 0, w, h), pals[1]),
+		image.NewPaletted(image.Rect(0, 0, w, h), pals[2]),
+		image.NewPaletted(image.Rect(0, 0, w, h), pals[3]),
+	}
+
+	var buf bytes.Buffer
+	e := NewStreamEncoder(&buf, &StreamEncoderOptions{
+		Config: image.Config{
+			ColorModel: pals[2],
+			Width:      w,
+			Height:     h,
+		},
+	})
+
+	for _, img := range images {
+		if err := e.Encode(img, 0, 0); err != nil {
+			t.Fatalf("StreamEncoder.Encode: %v", err)
+		}
+	}
+
+	if err := e.Close(); err != nil {
+		t.Fatalf("StreamEncoder.Close: %v", err)
+	}
+	g1, err := DecodeAll(&buf)
+	if err != nil {
+		t.Fatalf("DecodeAll: %v", err)
+	}
+	if len(images) != len(g1.Image) {
+		t.Fatalf("image lengths differ: %d and %d", len(images), len(g1.Image))
+	}
+	for i, m := range g1.Image {
+		if got, want := m.Palette, pals[i]; !palettesEqual(got, want) {
+			t.Errorf("frame %d:\ngot  %v\nwant %v", i, got, want)
+		}
+	}
+}
+
+func TestStreamEncodeBadPalettes(t *testing.T) {
+	const w, h = 5, 5
+	for _, n := range []int{256, 257} {
+		for _, nilColors := range []bool{false, true} {
+			pal := make(color.Palette, n)
+			if !nilColors {
+				for i := range pal {
+					pal[i] = color.Black
+				}
+			}
+
+			e := NewStreamEncoder(io.Discard, &StreamEncoderOptions{
+				Config: image.Config{
+					ColorModel: pal,
+					Width:      w,
+					Height:     h,
+				},
+			})
+
+			img := image.NewPaletted(image.Rect(0, 0, w, h), pal)
+			if err := e.Encode(img, 0, 0); err != nil {
+				t.Fatalf("StreamEncoder.Encode: %v", err)
+			}
+
+			err := e.Close()
 
 			got := err != nil
 			want := n > 256 || nilColors

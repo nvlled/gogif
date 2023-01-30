@@ -8,13 +8,13 @@ import (
 	"io"
 )
 
-type preInitEntry struct {
+type preInitImage struct {
 	pm       *image.Paletted
 	delay    int
 	disposal uint8
 }
 
-type StreamerOptions struct {
+type StreamEncoderOptions struct {
 	// LoopCount controls the number of times an animation will be
 	// restarted during display.
 	// A LoopCount of 0 means to loop forever.
@@ -38,39 +38,47 @@ type StreamerOptions struct {
 	BackgroundIndex byte
 }
 
-// Streamer allows encoding and writing images
+// StreamEncoder allows encoding and writing images
 // to w one at a time without accumulating
 // an array of images. Use this to reduce memory
 // consumption.
-type Streamer struct {
-	e *encoder
-	w io.Writer
+type StreamEncoder struct {
+	*encoder
 
 	initialized bool
 	closed      bool
-	index       int
 
-	preInitEntries []*preInitEntry
+	// Used to store the first two images
+	// before initializing, since writeHeader
+	// won't write the animation info if
+	// there's only one image, and even with streaming,
+	// it's possible that there's only one image encoded.
+	preInitImages []*preInitImage
 }
 
 // Creates a streamer.
-func NewStreamer(w io.Writer, options *StreamerOptions) *Streamer {
+func NewStreamEncoder(w io.Writer, options *StreamEncoderOptions) *StreamEncoder {
 	g := GIF{
 		LoopCount:       options.LoopCount,
 		Config:          options.Config,
 		BackgroundIndex: options.BackgroundIndex,
 	}
-	return &Streamer{
-		w: w,
-		e: &encoder{g: g},
+	e := &StreamEncoder{
+		encoder: &encoder{
+			g: g,
+		},
 	}
+	if ww, ok := w.(writer); ok {
+		e.w = ww
+	} else {
+		e.w = bufio.NewWriter(w)
+	}
+	return e
 }
 
-func (s *Streamer) init() error {
-	e := s.e
-
-	if len(s.preInitEntries) != 0 {
-		pm := s.preInitEntries[0].pm
+func (e *StreamEncoder) init() error {
+	if len(e.preInitImages) != 0 {
+		pm := e.preInitImages[0].pm
 		if e.g.Config == (image.Config{}) {
 			p := pm.Bounds().Max
 			e.g.Config.Width = p.X
@@ -82,76 +90,67 @@ func (s *Streamer) init() error {
 		}
 	}
 
-	if ww, ok := s.w.(writer); ok {
-		e.w = ww
-	} else {
-		e.w = bufio.NewWriter(s.w)
-	}
-
-	if len(e.g.Image) < len(s.preInitEntries) {
-		e.g.Image = make([]*image.Paletted, len(s.preInitEntries))
-	}
-
+	// writeHeader() only checks the length of g.Image to
+	// decide if the animation info should be written,
+	// so it's assigned an slice of size 2, then disposed immediately.
+	// There are surely better ways to do this, but I'd
+	// rather not touch the original encoder code.
+	e.g.Image = make([]*image.Paletted, len(e.preInitImages))
 	e.writeHeader()
-	s.initialized = true
-
-	for _, entry := range s.preInitEntries {
-		s.encode(entry.pm, entry.delay, entry.disposal)
-	}
-
-	s.preInitEntries = nil
 	e.g.Image = nil
 
+	for _, img := range e.preInitImages {
+		e.encode(img.pm, img.delay, img.disposal)
+	}
+
+	e.preInitImages = nil
+	e.initialized = true
 	return nil
 }
 
 // Encode writes the Image m to w in GIF format.
 // Note: not concurrent-safe
-func (s *Streamer) Encode(pm *image.Paletted, delay int, disposal uint8) error {
-	if s.closed {
+func (e *StreamEncoder) Encode(pm *image.Paletted, delay int, disposal uint8) error {
+	if e.closed {
 		return errors.New("gif: streamer is already closed")
 	}
 
-	if s.initialized {
-		s.encode(pm, delay, disposal)
+	if e.initialized {
+		e.encode(pm, delay, disposal)
 		return nil
 	}
 
-	s.preInitEntries = append(s.preInitEntries, &preInitEntry{pm, delay, disposal})
-	if len(s.preInitEntries) < 2 {
-		return nil
+	e.preInitImages = append(e.preInitImages, &preInitImage{pm, delay, disposal})
+	if len(e.preInitImages) >= 2 {
+		return e.init()
 	}
-
-	return s.init()
+	return nil
 }
 
-func (s *Streamer) encode(pm *image.Paletted, delay int, disposal uint8) {
-	e := s.e
+func (e *StreamEncoder) encode(pm *image.Paletted, delay int, disposal uint8) {
 	e.writeImageBlock(pm, delay, disposal)
-	s.index++
 }
 
-// Closes the streamer. Returns an error if
-// if streamer.Encode is not called at least once,
+// Closes the streamer, which finalizes the write to w.
+// Returns an error if streamer.Encode() is not called at least once,
 // or if config is invalid.
 // Note: not concurrent-safe
-func (s *Streamer) Close() error {
-	if s.closed {
-		return nil
+func (e *StreamEncoder) Close() error {
+	if e.closed {
+		return errors.New("gif: streamer is already closed")
 	}
-	if !s.initialized {
-		if len(s.preInitEntries) == 0 {
+	if !e.initialized {
+		if len(e.preInitImages) == 0 {
 			return errors.New("gif: must provide at least one image")
 		}
-		if err := s.init(); err != nil {
+		if err := e.init(); err != nil {
 			return err
 		}
 	}
 
-	e := s.e
 	e.writeByte(sTrailer)
 	e.flush()
 
-	s.closed = true
+	e.closed = true
 	return e.err
 }
